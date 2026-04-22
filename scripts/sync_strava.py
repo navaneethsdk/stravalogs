@@ -242,7 +242,8 @@ def fetch_streams(activity_id: int, token: str) -> dict:
     Fetch detailed streams (latlng, altitude, heartrate, cadence, watts).
     Used as a fallback if GPX export is unavailable.
     """
-    keys = "latlng,altitude,heartrate,cadence,watts,velocity_smooth"
+    # Include `time` so downstream conversions (e.g., JSON → GPX) can generate timestamps.
+    keys = "time,latlng,altitude,heartrate,cadence,watts,velocity_smooth"
     try:
         return strava_get(
             f"/activities/{activity_id}/streams",
@@ -251,6 +252,16 @@ def fetch_streams(activity_id: int, token: str) -> dict:
         )
     except requests.HTTPError:
         return {}
+
+def fetch_activity_details(activity_id: int, token: str) -> dict:
+    """
+    Fetch a detailed activity object.
+
+    Note: The `/athlete/activities` list endpoint often returns a summary object
+    that omits fields like `description`. The detailed endpoint fills those in,
+    assuming the token has the right scopes.
+    """
+    return strava_get(f"/activities/{activity_id}", token)
 
 
 # ---------------------------------------------------------------------------
@@ -300,6 +311,12 @@ def _metadata(activity: dict) -> dict:
         "start_date_local":  activity.get("start_date_local", ""),
         "start_date_unix":   _iso_to_unix(activity.get("start_date", "")),
         "description":       activity.get("description") or "",
+        "timezone":          activity.get("timezone") or "",
+        "start_latlng":      activity.get("start_latlng"),
+        "end_latlng":        activity.get("end_latlng"),
+        "location_city":     activity.get("location_city"),
+        "location_state":    activity.get("location_state"),
+        "location_country":  activity.get("location_country"),
         "distance_m":        activity.get("distance", 0),
         "moving_time_s":     activity.get("moving_time", 0),
         "elapsed_time_s":    activity.get("elapsed_time", 0),
@@ -385,10 +402,14 @@ def main() -> None:
         print(f"\n→ [{kind}] {name} (id={aid})")
 
         try:
+            # Fetch full details so fields like `description` are present.
+            detailed = fetch_activity_details(aid, token)
+
+            kind = detailed.get("type", kind)
             if kind in GPS_TYPES:
-                save_gps_activity(activity, token)
+                save_gps_activity(detailed, token)
             else:
-                save_manual_activity(activity)
+                save_manual_activity(detailed)
             saved_count += 1
         except Exception as exc:
             print(f"  ERROR saving {aid}: {exc}")
