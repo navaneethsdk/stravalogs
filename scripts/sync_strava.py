@@ -46,6 +46,14 @@ TOKEN_CACHE    = Path(".strava_token_cache.json")
 STRAVA_AUTH_URL = "https://www.strava.com/oauth/token"
 STRAVA_API_BASE = "https://www.strava.com/api/v3"
 
+DEBUG = os.environ.get("STRAVA_DEBUG", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def debug(msg: str) -> None:
+    if DEBUG:
+        print(f"[debug] {msg}")
+
+
 # Activity types that carry GPS data and can be exported as GPX
 GPS_TYPES = {
     "Run", "Ride", "Swim", "Walk", "Hike", "AlpineSki", "BackcountrySki",
@@ -70,12 +78,21 @@ def save_cached_token(data: dict) -> None:
     TOKEN_CACHE.write_text(json.dumps(data, indent=2))
 
 
+def clear_cached_token() -> None:
+    try:
+        TOKEN_CACHE.unlink()
+        debug(f"Deleted token cache file {TOKEN_CACHE}")
+    except FileNotFoundError:
+        return
+
+
 def get_access_token() -> str:
     """Return a valid access token, refreshing if necessary."""
     cached = load_cached_token()
 
     # Reuse if still valid (with 60-second buffer)
     if cached.get("access_token") and cached.get("expires_at", 0) > time.time() + 60:
+        debug(f"Using cached access token; expires_at={cached.get('expires_at')}")
         return cached["access_token"]
 
     if not all([CLIENT_ID, CLIENT_SECRET, REFRESH_TOKEN]):
@@ -98,6 +115,17 @@ def get_access_token() -> str:
     resp.raise_for_status()
     token_data = resp.json()
     save_cached_token(token_data)
+    debug(
+        "Token refresh OK. "
+        f"expires_at={token_data.get('expires_at')} "
+        f"scope={token_data.get('scope')!r}"
+    )
+    athlete = token_data.get("athlete") or {}
+    if athlete:
+        debug(
+            "Athlete from refresh response: "
+            f"id={athlete.get('id')} username={athlete.get('username')}"
+        )
 
     # If Strava rotated the refresh token, print it so the caller can update
     # the secret (this rarely happens but is worth surfacing).
@@ -124,11 +152,20 @@ def strava_get(path: str, token: str, params: dict | None = None) -> dict | list
             params=params or {},
             timeout=20,
         )
+        debug(f"GET {resp.request.url} → {resp.status_code}")
         if resp.status_code == 429:
             wait = int(resp.headers.get("X-RateLimit-Reset", 60))
             print(f"Rate limited — waiting {wait}s…")
             time.sleep(wait)
             continue
+        if resp.status_code >= 400:
+            body = ""
+            try:
+                body = (resp.text or "").strip()
+            except Exception:
+                body = ""
+            if body:
+                debug(f"Error body (first 800 chars): {body[:800]}")
         resp.raise_for_status()
         return resp.json()
     raise RuntimeError(f"Failed after retries: {url}")
@@ -306,7 +343,31 @@ def main() -> None:
     after   = last_activity_timestamp()
 
     print(f"Fetching activities after {datetime.fromtimestamp(after, tz=timezone.utc).isoformat() if after else 'the beginning'}…")
-    activities = fetch_activities(token, after=after)
+    try:
+        activities = fetch_activities(token, after=after)
+    except requests.HTTPError as exc:
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+        if status == 401:
+            detail = ""
+            try:
+                detail = (exc.response.text or "").strip()
+            except Exception:
+                pass
+
+            print("ERROR: Strava API returned 401 Unauthorized.")
+            if detail:
+                print(f"Response: {detail}")
+            print(
+                "This usually means STRAVA_CLIENT_ID/SECRET/REFRESH_TOKEN don't belong together, "
+                "the athlete revoked access, or the app lacks the required scopes (often `activity:read_all`)."
+            )
+            print("Retrying once with a freshly refreshed token (clearing local token cache)…")
+
+            clear_cached_token()
+            token = get_access_token()
+            activities = fetch_activities(token, after=after)
+        else:
+            raise
     print(f"Found {len(activities)} activit{'y' if len(activities) == 1 else 'ies'} from Strava")
 
     new_activities = [a for a in activities if a["id"] not in seen]
