@@ -357,7 +357,11 @@ def main() -> None:
 
     token   = get_access_token()
     seen    = existing_ids()
-    after   = last_activity_timestamp()
+    # Offset control:
+    # - Default behavior: resume from the latest saved activity timestamp.
+    # - Set STRAVA_FULL_SYNC=1 to fetch from the beginning (after=0).
+    full_sync = os.environ.get("STRAVA_FULL_SYNC", "").strip().lower() in {"1", "true", "yes", "on"}
+    after   = 0 if full_sync else last_activity_timestamp()
 
     print(f"Fetching activities after {datetime.fromtimestamp(after, tz=timezone.utc).isoformat() if after else 'the beginning'}…")
     try:
